@@ -59,7 +59,7 @@ public class ElasticsearchConnector {
             }
             numberOfRecordsProduced += scrollResp.getHits().getHits().length;
             log.info("Reocrds produced : " + numberOfRecordsProduced);
-            scrollResp = client.prepareSearchScroll(scrollResp.getScrollId()).setScroll(new TimeValue(appProperties.getScrollTime()))
+            scrollResp = client.prepareSearchScroll(scrollResp.getScrollId()).setScroll(new TimeValue(scrollTime))
                     .execute().actionGet();
 
         } while(scrollResp.getHits().getHits().length != 0);
