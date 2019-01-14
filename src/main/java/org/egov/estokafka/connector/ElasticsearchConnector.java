@@ -2,17 +2,18 @@ package org.egov.estokafka.connector;
 
 import lombok.extern.slf4j.Slf4j;
 import org.egov.estokafka.config.AppProperties;
-import org.egov.estokafka.models.ESScrollResponse;
-import org.json.JSONArray;
+import org.egov.estokafka.producer.Producer;
+import org.elasticsearch.action.search.SearchResponse;
+import org.elasticsearch.client.Client;
+import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.transport.TransportAddress;
+import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.search.SearchHit;
+import org.elasticsearch.transport.client.PreBuiltTransportClient;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.MalformedURLException;
-import java.net.URL;
+import java.net.InetAddress;
 
 @Slf4j
 public class ElasticsearchConnector {
@@ -22,101 +23,49 @@ public class ElasticsearchConnector {
     private Integer batchSize;
     private Integer scrollTime;
 
-    private String esURL;
-    private String matchAllQueryContent;
+    private Client client;
+    private Producer producer;
 
 
     public ElasticsearchConnector(AppProperties appProperties) {
         this.appProperties = appProperties;
+
         batchSize = appProperties.getBatchSize();
         scrollTime = appProperties.getScrollTime();
-        esURL = appProperties.getEsURL();
 
-        matchAllQueryContent = "{\"size\":" + batchSize + ",\"query\":{\"match_all\":{}}}";
-    }
-
-
-    public ESScrollResponse startScroll(String sourceIndex) {
-        ESScrollResponse esScrollResponse = new ESScrollResponse();
+        producer = new Producer();
 
         try {
-            URL queryURL = new URL(esURL + sourceIndex + "_search?scroll=" + scrollTime + "m");
-            String response = executeQuery(queryURL, matchAllQueryContent);
-            JSONArray hitsContent = getHitsContent(response);
-            String scrollId = new JSONObject(response).getString("_scroll_id");
-            esScrollResponse = ESScrollResponse.builder().scrollId(scrollId).hitsContent(hitsContent).build();
-
-        } catch (MalformedURLException e) {
+            client = new PreBuiltTransportClient(Settings.EMPTY)
+                    .addTransportAddress(new TransportAddress(InetAddress.getByName(appProperties.getEsHost()),
+                            Integer.parseInt(appProperties.getEsPort())));
+        } catch (Exception e) {
             log.error(e.getMessage());
         }
 
-        return esScrollResponse;
     }
 
-    public ESScrollResponse getNextScroll(String sccrollId) {
-        ESScrollResponse esScrollResponse = new ESScrollResponse();
+    public void fetchAllRecordsAndPushToKafka() {
 
-        try {
-            URL queryURL = new URL(esURL + "_search/scroll");
-            String queryContent = "{\"scroll\":\"" + scrollTime + "m\",\"scroll_id\":\"" + sccrollId + "\"}";
-            String response = executeQuery(queryURL, queryContent);
-            JSONArray hitsContent = getHitsContent(response);
-            String scrollId = new JSONObject(response).getString("_scroll_id");
-            esScrollResponse = ESScrollResponse.builder().scrollId(scrollId).hitsContent(hitsContent).build();
+        SearchResponse scrollResp = client.prepareSearch(appProperties.getSourceIndex())
+                .setQuery(QueryBuilders.matchAllQuery())
+                .setScroll(new TimeValue(scrollTime))
+                .setSize(batchSize).get();
 
-        } catch (MalformedURLException e) {
-            log.error(e.getMessage());
-        }
-
-        return esScrollResponse;
-    }
-
-    private JSONArray getHitsContent(String esResponse) {
-        JSONArray hitsContent = new JSONArray();
-
-        JSONObject esResponseContent = new JSONObject(esResponse);
-        JSONArray jsonArray = esResponseContent.getJSONObject("hits").getJSONArray("hits");
-
-        for(Object hit : jsonArray) {
-            hitsContent.put(((JSONObject) hit).getJSONObject("_source"));
-        }
-
-        return hitsContent;
-    }
-
-
-    private String executeQuery(URL url, String queryContent) {
-        String esResponse = null;
-
-        try {
-            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-            connection.setRequestMethod("POST");
-            connection.setRequestProperty("Content-Type", "application/json");
-
-            connection.setDoOutput(true);
-            OutputStream connectionOutputStream =  connection.getOutputStream();
-
-            connectionOutputStream.write(queryContent.getBytes());
-
-            if(connection.getResponseCode() == HttpURLConnection.HTTP_OK) {
-                BufferedReader in = new BufferedReader(new InputStreamReader(connection.getInputStream()));
-                String inputLine;
-                StringBuffer response = new StringBuffer();
-                while ((inputLine = in .readLine()) != null) {
-                    response.append(inputLine);
-                }
-                in .close();
-                esResponse = response.toString();
-            } else {
-                log.info("Error in Elasticsearch Query");
+        Long numberOfRecordsProduced = 0L;
+        do {
+            for (SearchHit hit : scrollResp.getHits().getHits()) {
+                producer.push(appProperties.getDestinationTopic(), new JSONObject(hit.getSourceAsMap()));
             }
+            numberOfRecordsProduced += scrollResp.getHits().getHits().length;
+            log.info("Reocrds produced : " + numberOfRecordsProduced);
+            scrollResp = client.prepareSearchScroll(scrollResp.getScrollId()).setScroll(new TimeValue(appProperties.getScrollTime()))
+                    .execute().actionGet();
 
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+        } while(scrollResp.getHits().getHits().length != 0);
 
+        log.info("Total Records Produced : " + numberOfRecordsProduced);
 
-        return esResponse;
     }
 
 }

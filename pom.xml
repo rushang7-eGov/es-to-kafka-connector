@@ -33,7 +33,7 @@
                     </descriptorRefs>
                     <archive>
                         <manifest>
-                            <mainClass>org.egov.estokafka.Main</mainClass>
+                            <mainClass>org.egov.estokafka.ESToKafkaApplication</mainClass>
                         </manifest>
                     </archive>
                 </configuration>
